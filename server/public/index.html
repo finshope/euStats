@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>实时数据监控</title>
+  <script src="https://cdn.jsdelivr.net/npm/vue@2/dist/vue.js"></script>
+  <!-- 引入样式 -->
+  <link rel="stylesheet" href="https://unpkg.com/element-ui/lib/theme-chalk/index.css">
+  <!-- 引入组件库 -->
+  <script src="https://unpkg.com/element-ui/lib/index.js"></script>
+  <script src="echarts.min.js"></script>
+  <style>
+    html,
+    body {
+      height: 100%;
+      padding: 0;
+      margin: 0;
+    }
+
+    #app {
+      height: calc(100% - 10px);
+      text-align: center;
+      padding-top: 10px;
+    }
+
+    .tool-bar {
+      margin-bottom: 10px;
+      margin-left: 10px;
+      text-align: left;
+    }
+
+    .graph-container {
+      text-align: center;
+      width: 100%;
+      height: calc(50% - 60px);
+    }
+  </style>
+</head>
+
+<body>
+  <div id="app">
+    <el-row class="tool-bar">
+      <el-button type="primary" size="small" @click="openAACal">星阵计算器</el-button>
+    </el-row>
+    <el-row style="margin-bottom: 10px">
+      <el-col :span="7">
+        每隔<el-input size="small" v-model.number="interval" style="width: 120px">
+          <template #append>秒</template>
+        </el-input>
+        自动刷新
+        <el-switch size="small" v-model="autoFetchEnabled" @change="onAutoChange"></el-switch>
+      </el-col>
+      <el-col :span="7">
+        获取最近<el-input size="small" @keyup.enter.native="loadData" v-model.number="seconds" style="width: 200px">
+          <template #append>秒</template> </el-input>数据
+      </el-col>
+      <el-col :span="7">
+        统计每<el-input size="small" @keyup.enter.native="loadData" v-model.number="minutes" style="width: 200px">
+          <template #append>分钟</template> </el-input>平均发电
+      </el-col>
+      <el-col :span="3">
+        <el-button v-loading="loading" size="small" type="primary" @click="loadData">更新</el-button>
+      </el-col>
+    </el-row>
+    <div id="main" ref="main" class="graph-container"></div>
+    <div class="stat">
+      平均发电：<span
+        style="font-size: bold; color: green">{{averageEUt.toExponential(1)}}</span>EU/t（<span>{{averageMax}}</span>A
+      Max） 预计<span
+        style="color: #ff2f9a; font-weight: bolder; font-size: 20px">{{averageTime}}</span><span>{{averageEUt>0?'充满':'耗完'}}</span>
+    </div>
+    <div id="eut" ref="eut" class="graph-container"></div>
+    <el-dialog title="星阵计算器" :visible.sync="aaDialogVisble" width="70%">
+      <div>
+        <el-form :model="aaForm" ref="form" label-width="80px" :inline="false" size="small">
+          <el-form-item label="星阵数量">
+            <el-input v-model.number="aaForm.aaCount" @input="calculateAA"></el-input>
+          </el-form-item>
+          <el-form-item label="配方等级">
+            <el-input v-model.number="aaForm.receipeLevel" placeholder="配方等级1到10" @input="calculateAA"></el-input>
+          </el-form-item>
+          <el-form-item label="并行数量">
+            {{aaForm.parallelCount}}
+          </el-form-item>
+          <el-form-item label="流体量"> {{aaForm.fulidAmount}} </el-form-item>
+        </el-form>
+      </div>
+      <span slot="footer">
+        <el-button type="primary" @click="aaDialogVisble=false">OK</el-button>
+      </span>
+    </el-dialog>
+  </div>
+  <script>
+    function formatSeconds(seconds) {
+      if (seconds < 60) {
+        return seconds + "秒";
+      } else if (seconds < 3600) {
+        return Math.round(seconds / 60) + "分";
+      } else {
+        return Math.round(seconds / 3600) + "小时";
+      }
+    }
+
+    new Vue({
+      el: "#app",
+      data() {
+        return {
+          data: [],
+          times: [],
+          autoFetchEnabled: false,
+          interval: 60,
+          timer: null,
+          dom1: null,
+          echart1: null,
+          dom2: null,
+          echart2: null,
+          canvasWidth: 800,
+          canvasHeight: 600,
+          seconds: 3600,
+          minutes: 5,
+          loading: false,
+          averageEUt: 0,
+          averageMax: 0,
+          averageTime: -1,
+          aaDialogVisble: false,
+          aaForm: {
+            aaCount: 1,
+            receipeLevel: 10,
+            parallelCount: 8,
+            fulidAmount: 0,
+          },
+        };
+      },
+      computed: {
+        latestData() {
+          let length = this.data.length;
+          return this.data.slice(length - 360);
+        },
+      },
+      created() { },
+      mounted() {
+        this.dom1 = this.$refs.main;
+        this.echart1 = echarts.init(this.dom1);
+        this.dom2 = this.$refs.eut;
+        this.echart2 = echarts.init(this.dom2);
+        this.loadData();
+
+        window.onresize = this.resetSize;
+        this.resetSize();
+      },
+      methods: {
+        async addData() {
+          try {
+            this.loading = true;
+            // 向'/api/data' post数组
+            const response = await fetch("/api/data", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify([
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1,
+              ]),
+            });
+            let res = await response.json();
+            this.loading = false;
+          } catch (error) {
+            console.error("数据保存失败:", error);
+            this.loading = false;
+          }
+        },
+        async loadData() {
+          try {
+            this.loading = true;
+            const response = await fetch("/api/data?q=" + this.seconds);
+            let res = await response.json();
+            this.data = res.map(e => e.eu)
+            this.times = res.map(e => e.time)
+            this.setData();
+          } catch (error) {
+            console.error("数据加载失败:", error);
+            this.loading = false;
+          }
+        },
+        resetSize() {
+          this.canvasWidth = document.body.clientWidth;
+          this.canvasHeight = document.body.clientHeight - 120;
+          this.echart1.resize();
+          this.echart2.resize();
+        },
+        onAutoChange() {
+          if (!this.autoFetchEnabled) {
+            clearInterval(this.timer);
+          } else {
+            this.timer = setInterval(() => {
+              this.loadData();
+            }, this.interval * 1000);
+          }
+        },
+        setData() {
+          this.averageEUt =
+            (this.data[this.data.length - 1] - this.data[0]) /
+            (this.data.length - 1) /
+            20;
+          this.averageMax = Math.round((this.averageEUt / (2 ** 31 - 1))).toLocaleString();
+          if (this.averageEUt < 0) {
+            let useOutSeconds = Math.floor(
+              this.data[this.data.length - 1] / -this.averageEUt / 20
+            );
+            this.averageTime = `${Math.floor(useOutSeconds / 3600)}小时`;
+          } else {
+            this.averageTime = "鸡啄断了锁，狗吃完了米，火烧熟了面时";
+          }
+
+          let option1, option2;
+
+          let min = Number.MAX_VALUE;
+          let max = Number.MIN_VALUE;
+
+          for (let val of this.data) {
+            min = Math.min(val, min);
+            max = Math.max(val, max);
+          }
+
+          option1 = {
+            title: {
+              text: `最近${formatSeconds(this.seconds)}无线电网总EU`,
+            },
+            legend: {
+              // Try 'horizontal'
+              orient: "vertical",
+              right: 10,
+              top: "center",
+            },
+            xAxis: {
+              type: "category",
+              data: this.times,
+            },
+            yAxis: {
+              type: "value",
+              min,
+              max,
+              axisLabel: {
+                formatter: (text) => {
+                  return Number(text).toExponential(3) + "EU";
+                },
+              },
+            },
+            series: [
+              {
+                data: this.data,
+                name: "EU",
+                type: "line",
+              },
+            ],
+            tooltip: {
+              trigger: "axis",
+              axisPointer: {
+                type: "cross",
+                crossStyle: {
+                  color: "#999",
+                },
+              },
+              formatter: function (params) {
+                let p1 = params[0];
+                let value = p1.data;
+                return `${value}(${Number(value).toExponential(3)})`;
+              },
+            },
+          };
+
+          this.echart1.setOption(option1);
+
+          let eutPerSeconds = [];
+          let eutMin = Number.MAX_VALUE;
+          let eutMax = Number.MIN_VALUE;
+          let gapLength = this.minutes * 60;
+          let xAxes = []
+          for (let i = 0; i + gapLength < this.data.length; i += gapLength) {
+            let val =
+              (this.data[i + gapLength] - this.data[i]) / (gapLength * 20);
+            let color = "#5470c6";
+            xAxes.push(this.times[i])
+
+            if (val < 0) {
+              color = "#ee0000";
+            } else if (val > 2.1e14) {
+              color = "#00ee00";
+            }
+            eutPerSeconds.push({
+              value: val,
+              itemStyle: {
+                color: color,
+              },
+            });
+            eutMax = Math.max(eutMax, val);
+            eutMin = Math.min(eutMin, val);
+          }
+          eutMin = Math.min(eutMin, 0);
+          eutMax = Math.max(eutMax, 0);
+
+          option2 = {
+            title: {
+              text: `最近${formatSeconds(this.seconds)}每${this.minutes
+                }分钟平均发电`,
+            },
+            grid: {
+              x: 200, //默认是80px
+              y: 60, //默认是60px
+              x2: 40, //默认80px
+              y2: 60, //默认60px
+            },
+            legend: {
+              // Try 'horizontal'
+              orient: "vertical",
+              right: 10,
+              top: "center",
+            },
+            xAxis: {
+              type: "category",
+              data: xAxes,
+            },
+            yAxis: {
+              type: "value",
+              min: eutMin,
+              max: eutMax,
+              axisLabel: {
+                width: 300,
+                formatter: (text) => {
+                  let num = Number(text);
+                  let a = (num / (2 ** 31 - 1)).toFixed(0);
+                  return num.toExponential(1) + "EU/t" + `(${a}A Max)`;
+                },
+              },
+            },
+            series: [
+              {
+                data: eutPerSeconds,
+                name: "EU/t",
+                type: "bar",
+                barWidth: "95%",
+                label: {
+                  show: true,
+                  position: "inside",
+                  formatter: (obj) => {
+                    let value = obj.data.value;
+                    let num = Number(value);
+                    let a = (num / (2 ** 31 - 1)).toFixed(0);
+
+                    return `${a}A`;
+                  },
+                },
+              },
+            ],
+            tooltip: {
+              trigger: "axis",
+              axisPointer: {
+                type: "cross",
+                crossStyle: {
+                  color: "#999",
+                },
+              },
+              formatter: function (params) {
+                let p1 = params[0];
+                let value = p1.data.value;
+                let num = Number(value);
+                let a = (num / (2 ** 31 - 1)).toFixed(0);
+
+                return num.toExponential(1) + "EU/t" + `(${a}A Max)`;
+              },
+            },
+          };
+
+          this.echart2.setOption(option2);
+
+          this.loading = false;
+        },
+        openAACal() {
+          this.aaDialogVisble = true;
+        },
+        calculateAA() {
+          let aaCount = this.aaForm.aaCount;
+          let receipeLevel = this.aaForm.receipeLevel;
+          receipeLevel = Math.min(9, receipeLevel);
+          let pow = Math.floor(Math.log10(8 * aaCount) / Math.log10(1.7));
+          this.aaForm.parallelCount = 2 ** pow;
+          this.aaForm.fulidAmount = Math.floor(
+            1000 * (receipeLevel + 1) * this.aaForm.parallelCount * 12.4
+          );
+        },
+      },
+    });
+  </script>
+</body>
+
+</html>
